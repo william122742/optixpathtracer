@@ -136,7 +136,7 @@ static __forceinline__ __device__ void setPayloadOcclusion( bool occluded )
     optixSetPayload_0( static_cast<uint32_t>( occluded ) );
 }
 
-
+// pdf = cos_theta/(pi*r^2) ?
 static __forceinline__ __device__ void cosine_sample_hemisphere( const float u1, const float u2, float3& p )
 {
     // Uniformly sample disk.
@@ -192,32 +192,23 @@ static __forceinline__ __device__ bool traceOcclusion(
         float                  tmax
         )
 {
+    uint32_t u0 = false;
 
-    uint32_t tmp0;
-    uint32_t tmp1;
-    RadiancePRD curprd;
-    curprd.origin = ray_origin;
-    curprd.done = false;
-    curprd.countEmitted = false;
-    curprd.direction.x = tmax;
-    packPointer(&curprd, tmp0, tmp1);
-
-    //while (curprd.done ==false && curprd.countEmitted == false) {
         optixTrace(
             handle,
-            curprd.origin,
+            ray_origin,
             ray_direction,
             tmin,
-            curprd.direction.x,
+            tmax,
             0.0f,                    // rayTime
             OptixVisibilityMask(1),
             OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
             RAY_TYPE_OCCLUSION,      // SBT offset
             RAY_TYPE_COUNT,          // SBT stride
             RAY_TYPE_OCCLUSION,      // missSBTIndex
-            tmp0,tmp1);
-    //}
-    return curprd.countEmitted;
+            u0);
+    
+    return u0;
 }
 
 
@@ -303,7 +294,6 @@ __forceinline__ __device__ float3 calcBRDF(BRDFMaterial* cur_mat, float3 l, floa
                 float eta_l = exiting ? 1.f : cur_mat->ior;
                 float eta_v = exiting ? cur_mat->ior: 1.f;
                 float eta = eta_l / eta_v;
-                //n = exiting ? -n : n;
 
                 float3 ht = -normalize(l*eta + v);
                 
@@ -313,15 +303,15 @@ __forceinline__ __device__ float3 calcBRDF(BRDFMaterial* cur_mat, float3 l, floa
 
                 float v_dot_ht = dot(v, ht);
                 float l_dot_ht = dot(l, ht);
-                float X_vht = X_plus(-v_dot_ht);
-                float X_lht = X_plus(-l_dot_ht);
+                float X_vht = X_plus(v_dot_ht);
+                float X_lht = X_plus(l_dot_ht);
                 
 
                 float RF_ht = Fresnel(cos_v, cos_ht, eta);
                 //float RF_ht = SchlickFresnel(eta_v, eta_l, dot(v, ht));
                 
                 float tmp = eta / (v_dot_ht + l_dot_ht * eta);
-                tmp = fabs(l_dot_ht) * fabs(v_dot_ht) * (tmp * tmp) /M_PI;
+                tmp = fabs(l_dot_ht) * fabs(v_dot_ht) * (tmp * tmp);
                 f_trans = tmp * (1.0f - RF_ht) * D_TRt * Gst;// *(X_vht * X_lht);
                 
             }
@@ -429,27 +419,9 @@ extern "C" __global__ void __miss__radiance()
     prd->done     = true;
 }
 
-extern "C" __global__ void __miss__occlusion()
-{
-    RadiancePRD* prd = getPRD();
-    prd->done = true;
-}
-
 extern "C" __global__ void __closesthit__occlusion()
 {
-    
-    HitGroupData* rt_data = (HitGroupData*)optixGetSbtDataPointer();
-    RadiancePRD* curprd = getPRD();
-    //if (params.materials[rt_data->mat_id].spec_trans == 0) {
-        curprd->countEmitted = true;  
-    //}
-    //else {
-    //    float3  ray_dir = optixGetWorldRayDirection();
-    //    float3 P = optixGetWorldRayOrigin() + optixGetRayTmax() * ray_dir;
-    //    curprd->origin = P;
-    //    curprd->direction.x -= optixGetRayTmax();
-    //}
-    
+    setPayloadOcclusion( true );   
 }
 
 
@@ -487,13 +459,15 @@ extern "C" __global__ void __closesthit__radiance()
     } 
 
     BRDFMaterial* cur_mat = &(params.materials[rt_data->mat_id]);
-
+    
+    float oldnDl = 2.f*dot(-prd->direction,N);
     // sampling emission only once to avoid noise
-    prd->emitted = ( prd->countEmitted ) ? cur_mat->emission : make_float3( 0.0f );
+    prd->emitted = ( prd->countEmitted ) ? cur_mat->emission*oldnDl : make_float3( 0.0f ); // shuold mult by cos_theta'?
     
     const float3 P = optixGetWorldRayOrigin() + optixGetRayTmax() * ray_dir;
 
     uint32_t seed = prd->seed;
+
 
     float3 w_in;
     {
@@ -504,10 +478,11 @@ extern "C" __global__ void __closesthit__radiance()
         cosine_sample_hemisphere( z1, z2, w_in );
         Onb onb(N);
         onb.inverse_transform(w_in);
-        if (prd->inmat == false && cur_mat->spec_trans != 0 && rnd(seed) > 0.5f) {   
+        
+        if (prd->inmat == false && cur_mat->spec_trans != 0){// && rnd(seed) > 0.5f) {   
+           w_in = w_in*-N*2.0f*dot(N,w_in);
             prd->inmat = true;
-            w_in = -w_in;
-        } else {
+        } else {      
             prd->inmat = false;
         }
 
@@ -529,6 +504,7 @@ extern "C" __global__ void __closesthit__radiance()
         const float3 L = normalize(light_pos - P);
         const float  nDl = dot(N, L);
         const float  LnDl = -dot(light.normal, L);
+        
 
         float weight = 0.0f;
         prd->radiance = make_float3(0.f);
@@ -546,7 +522,7 @@ extern "C" __global__ void __closesthit__radiance()
             {
                 const float dA = length(cross(light.v1, light.v2));
                 weight = nDl * LnDl * dA / max(M_PIf * Ldist * Ldist, 0.001f);
-                prd->radiance = (calcBRDF(cur_mat, normalize(L), -normalize(prd->direction), normalize(N)) * light.emission) * weight;
+                prd->radiance = (calcBRDF(cur_mat, normalize(L), -normalize(prd->direction), normalize(N)) * light.emission) * weight*oldnDl; //shuold add cos_theta' ?
             }
             
         }
