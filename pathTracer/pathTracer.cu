@@ -62,6 +62,8 @@ struct Onb
     {
         m_normal = normal;
 
+        // project back to limited space (relection direction)
+        /**
         if( fabs( m_normal.x ) > fabs( m_normal.z ) )
         {
             m_binormal.x = -m_normal.y;
@@ -77,6 +79,18 @@ struct Onb
 
         m_binormal = normalize( m_binormal );
         m_tangent  = cross( m_binormal, m_normal );
+        */
+
+        // project back to entire space
+        float x=normal.x;
+        float y = normal.y;
+        float z = normal.z;
+        m_tangent.x = -(y*y/(1+z)+z);
+        m_tangent.y = (x*y)/(z+1);
+        m_tangent.z = x;
+        m_binormal.x = x*y/(z+1);
+        m_binormal.y = -(x*x/(1+z)+z);
+        m_binormal.z = y;
     }
 
     __forceinline__ __device__ void inverse_transform( float3& p ) const
@@ -136,7 +150,7 @@ static __forceinline__ __device__ void setPayloadOcclusion( bool occluded )
     optixSetPayload_0( static_cast<uint32_t>( occluded ) );
 }
 
-// pdf = cos_theta/(pi*r^2) ?
+// pdf(r,theta) = cos(theta)/(2*pi*r^2) ?
 static __forceinline__ __device__ void cosine_sample_hemisphere( const float u1, const float u2, float3& p )
 {
     // Uniformly sample disk.
@@ -144,7 +158,6 @@ static __forceinline__ __device__ void cosine_sample_hemisphere( const float u1,
     const float phi = 2.0f * M_PIf * u2;
     p.x             = r * cosf( phi );
     p.y             = r * sinf( phi );
-
     // Project up to hemisphere.
     p.z = sqrtf( fmaxf( 0.0f, 1.0f - p.x * p.x - p.y * p.y ) );
 }
@@ -234,7 +247,7 @@ __forceinline__ __device__ float SchlickFresnel(float n1, float n2, float cos_h)
 __forceinline__ __device__ float Fresnel(float cos_i,float cos_t,  float eta) {
 
     if (cos_i*cos_i <= 1.f-eta*eta){
-        return 0.f;
+        return 1.f;
     }
     float a = (cos_i - eta * cos_t) / (cos_i + eta * cos_t);
     float b = (cos_t - eta * cos_i) / (cos_t + eta * cos_i);
@@ -297,22 +310,24 @@ __forceinline__ __device__ float3 calcBRDF(BRDFMaterial* cur_mat, float3 l, floa
 
                 float3 ht = -normalize(l*eta + v);
                 
+                //float3 ht = exiting ? normalize(l*eta+v-2.f*dot(n,v)*n): normalize((l-2.f*dot(n,l)*n)*eta+v);                
+
                 float cos_ht = dot(ht, n);
-                float D_TRt = D_GXX(cos_ht, alpha);
+                float D_TRt = D_GXX(cos_ht, alpha) * X_plus(cos_ht);
                 float Gst = Smith_GGX(fabs(cos_v), alpha) * Smith_GGX(fabs(cos_l), alpha);
 
                 float v_dot_ht = dot(v, ht);
                 float l_dot_ht = dot(l, ht);
-                float X_vht = X_plus(v_dot_ht);
-                float X_lht = X_plus(l_dot_ht);
+                float X_vht = X_plus(v_dot_ht/cos_v);
+                float X_lht = X_plus(l_dot_ht/cos_l);
                 
 
                 float RF_ht = Fresnel(cos_v, cos_ht, eta);
                 //float RF_ht = SchlickFresnel(eta_v, eta_l, dot(v, ht));
                 
                 float tmp = eta / (v_dot_ht + l_dot_ht * eta);
-                tmp = fabs(l_dot_ht) * fabs(v_dot_ht) * (tmp * tmp);
-                f_trans = tmp * (1.0f - RF_ht) * D_TRt * Gst;// *(X_vht * X_lht);
+                tmp = fabs(l_dot_ht) * fabs(v_dot_ht) * (tmp * tmp)*4.f;
+                f_trans = tmp * (1.0f - RF_ht) * D_TRt * Gst *(X_vht * X_lht);
                 
             }
             return (f_diff * (1.f - fspec_trans) + f_trans * fspec_trans) * (1.f - fmetallic) + f_spec * fmetallic;
@@ -461,6 +476,9 @@ extern "C" __global__ void __closesthit__radiance()
     BRDFMaterial* cur_mat = &(params.materials[rt_data->mat_id]);
     
     float oldnDl = 2.f*dot(-prd->direction,N);
+    if (oldnDl <= 0.f){
+        oldnDl = 0.f;
+    }
     // sampling emission only once to avoid noise
     prd->emitted = ( prd->countEmitted ) ? cur_mat->emission*oldnDl : make_float3( 0.0f ); // shuold mult by cos_theta'?
     
@@ -482,8 +500,12 @@ extern "C" __global__ void __closesthit__radiance()
         if (prd->inmat == false && cur_mat->spec_trans != 0){// && rnd(seed) > 0.5f) {   
            w_in = w_in*-N*2.0f*dot(N,w_in);
             prd->inmat = true;
+            //Onb onb(-N);
+            //onb.inverse_transform(w_in);
         } else {      
             prd->inmat = false;
+            //Onb onb(N);
+            //onb.inverse_transform(w_in);
         }
 
         prd->curbrdf = calcBRDF(cur_mat, normalize(w_in), -normalize(prd->direction), normalize(N));
@@ -508,7 +530,7 @@ extern "C" __global__ void __closesthit__radiance()
 
         float weight = 0.0f;
         prd->radiance = make_float3(0.f);
-        if (nDl > 0.0f && LnDl > 0.0f && (prd->inmat == false|| rnd(seed)>0.5f ))
+        if (nDl > 0.0f && LnDl > 0.0f)// && (prd->inmat == false|| rnd(seed)>0.5f ))
         {
             const bool occluded = traceOcclusion(
                 params.handle,
