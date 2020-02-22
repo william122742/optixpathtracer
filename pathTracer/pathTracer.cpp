@@ -283,7 +283,7 @@ static std::array<uint32_t, TRIANGLE_COUNT> g_mat_indices =
     0, 0,                          // Back wall     -- white lambert
     1, 1,                          // Right wall    -- green lambert
     2, 2,                          // Left wall     -- red lambert
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  // Short block   -- cutout
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  //5, 5, 5, 5, 5, 5, 5, 5, 5, 5,  // Short block   -- cutout
     5, 5, 5, 5, 5, 5, 5, 5, 5, 5,  //4, 4, 4, 4, 4, 4, 4, 4, 4, 4,  // Tall block    -- white lambert
     3, 3                           // Ceiling light -- emmissive
 } };
@@ -396,9 +396,9 @@ void initMaterials(CutoutsState& state) {
 
     state.params.materials[5].base_color = { 0.80f, 0.80f, 0.80f };
     state.params.materials[5].emission = { 0.0f,  0.0f, 0.0f };
-    state.params.materials[5].ior = 1.5f;
-    state.params.materials[5].metallic = 0;
-    state.params.materials[5].roughness = 40;
+    state.params.materials[5].ior = 1.1f;
+    state.params.materials[5].metallic = 20;
+    state.params.materials[5].roughness = 20;
     state.params.materials[5].spec_trans = 100;
 }
 

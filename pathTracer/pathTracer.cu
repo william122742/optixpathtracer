@@ -246,7 +246,8 @@ __forceinline__ __device__ float SchlickFresnel(float n1, float n2, float cos_h)
 
 __forceinline__ __device__ float Fresnel(float cos_i,float cos_t,  float eta) {
 
-    if (cos_i*cos_i <= 1.f-eta*eta){
+    if (cos_i*cos_i <= 1.f-eta*eta)
+    {
         return 1.f;
     }
     float a = (cos_i - eta * cos_t) / (cos_i + eta * cos_t);
@@ -308,12 +309,11 @@ __forceinline__ __device__ float3 calcBRDF(BRDFMaterial* cur_mat, float3 l, floa
                 float eta_v = exiting ? cur_mat->ior: 1.f;
                 float eta = eta_l / eta_v;
 
-                float3 ht = -normalize(l*eta + v);
-                
-                //float3 ht = exiting ? normalize(l*eta+v-2.f*dot(n,v)*n): normalize((l-2.f*dot(n,l)*n)*eta+v);                
+                //float3 ht = -normalize(l*eta + v);// wrong ??
+                float3 ht = exiting ? normalize(l*eta+v-2.f*dot(n,v)*n): normalize((l-2.f*dot(n,l)*n)*eta+v);//reflect half             
 
                 float cos_ht = dot(ht, n);
-                float D_TRt = D_GXX(cos_ht, alpha) * X_plus(cos_ht);
+                float D_TRt = D_GXX(cos_ht, alpha);// * X_plus(cos_ht);
                 float Gst = Smith_GGX(fabs(cos_v), alpha) * Smith_GGX(fabs(cos_l), alpha);
 
                 float v_dot_ht = dot(v, ht);
@@ -321,12 +321,15 @@ __forceinline__ __device__ float3 calcBRDF(BRDFMaterial* cur_mat, float3 l, floa
                 float X_vht = X_plus(v_dot_ht/cos_v);
                 float X_lht = X_plus(l_dot_ht/cos_l);
                 
-
-                float RF_ht = Fresnel(cos_v, cos_ht, eta);
-                //float RF_ht = SchlickFresnel(eta_v, eta_l, dot(v, ht));
                 
-                float tmp = eta / (v_dot_ht + l_dot_ht * eta);
-                tmp = fabs(l_dot_ht) * fabs(v_dot_ht) * (tmp * tmp)*4.f;
+                //accurate fresnel
+                float cos_theta_t = sqrtf(1.f-(1.f-cos_v*cos_v)/(eta*eta));
+                float RF_ht = Fresnel(fabs(cos_v), fabs(cos_theta_t), eta);
+                //approx fresnel
+                //float RF_ht = SchlickFresnel(eta_v, eta_l, fabs(dot(v, ht)));
+                
+                float tmp = eta /(fabs(v_dot_ht) + fabs(l_dot_ht) * eta);
+                tmp = fabs(l_dot_ht) * fabs(v_dot_ht) * (tmp * tmp)*4.0f;
                 f_trans = tmp * (1.0f - RF_ht) * D_TRt * Gst *(X_vht * X_lht);
                 
             }
@@ -399,7 +402,7 @@ extern "C" __global__ void __raygen__rg()
 
             throughput *= prd.curbrdf;
 
-            if( prd.done  || depth >= 6)//3 ) // TODO RR, variable for depth
+            if( prd.done  || depth >= 10)//3 ) // TODO RR, variable for depth
                 break;
 
             ray_origin    = prd.origin;
@@ -475,41 +478,40 @@ extern "C" __global__ void __closesthit__radiance()
 
     BRDFMaterial* cur_mat = &(params.materials[rt_data->mat_id]);
     
-    float oldnDl = 2.f*dot(-prd->direction,N);
-    if (oldnDl <= 0.f){
-        oldnDl = 0.f;
+    float pdfweight = 2.f*dot(-prd->direction,N);
+    if (pdfweight <= 0.f){
+        pdfweight = 0.f;
     }
     // sampling emission only once to avoid noise
-    prd->emitted = ( prd->countEmitted ) ? cur_mat->emission*oldnDl : make_float3( 0.0f ); // shuold mult by cos_theta'?
+    prd->emitted = ( prd->countEmitted ) ? cur_mat->emission*pdfweight : make_float3( 0.0f ); // shuold mult by cos_theta'?
     
     const float3 P = optixGetWorldRayOrigin() + optixGetRayTmax() * ray_dir;
 
     uint32_t seed = prd->seed;
 
-
     float3 w_in;
     {
         const float z1 = rnd(seed);
         const float z2 = rnd(seed);
-
-        
         cosine_sample_hemisphere( z1, z2, w_in );
-        Onb onb(N);
-        onb.inverse_transform(w_in);
         
-        if (prd->inmat == false && cur_mat->spec_trans != 0){// && rnd(seed) > 0.5f) {   
-           w_in = w_in*-N*2.0f*dot(N,w_in);
+        float cur_eta = cur_mat->ior;
+        if (cur_mat->spec_trans != 0){
+            pdfweight*=(cur_eta+1.0f);
+        }
+        
+        if (prd->inmat == false && cur_mat->spec_trans != 0 && rnd(seed) > 1.0f/(1.0f+cur_eta)) {   
             prd->inmat = true;
-            //Onb onb(-N);
-            //onb.inverse_transform(w_in);
+            Onb onb(-N);
+            onb.inverse_transform(w_in);
+            pdfweight/=cur_eta; 
         } else {      
             prd->inmat = false;
-            //Onb onb(N);
-            //onb.inverse_transform(w_in);
+            Onb onb(N);
+            onb.inverse_transform(w_in);
         }
 
         prd->curbrdf = calcBRDF(cur_mat, normalize(w_in), -normalize(prd->direction), normalize(N));
-
         prd->countEmitted = false;
     }
    
@@ -530,7 +532,7 @@ extern "C" __global__ void __closesthit__radiance()
 
         float weight = 0.0f;
         prd->radiance = make_float3(0.f);
-        if (nDl > 0.0f && LnDl > 0.0f)// && (prd->inmat == false|| rnd(seed)>0.5f ))
+        if (nDl > 0.0f && LnDl > 0.0f)
         {
             const bool occluded = traceOcclusion(
                 params.handle,
@@ -544,7 +546,7 @@ extern "C" __global__ void __closesthit__radiance()
             {
                 const float dA = length(cross(light.v1, light.v2));
                 weight = nDl * LnDl * dA / max(M_PIf * Ldist * Ldist, 0.001f);
-                prd->radiance = (calcBRDF(cur_mat, normalize(L), -normalize(prd->direction), normalize(N)) * light.emission) * weight*oldnDl; //shuold add cos_theta' ?
+                prd->radiance = (calcBRDF(cur_mat, normalize(L), -normalize(prd->direction), normalize(N)) * light.emission) * weight*pdfweight; //shuold add cos_theta' ?
             }
             
         }
