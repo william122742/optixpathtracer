@@ -63,7 +63,7 @@ struct Onb
         m_normal = normal;
 
         // project back to limited space (relection direction)
-        /**
+        /*
         if( fabs( m_normal.x ) > fabs( m_normal.z ) )
         {
             m_binormal.x = -m_normal.y;
@@ -79,8 +79,8 @@ struct Onb
 
         m_binormal = normalize( m_binormal );
         m_tangent  = cross( m_binormal, m_normal );
-        */
-
+        
+        **/
         // project back to entire space
         float x=normal.x;
         float y = normal.y;
@@ -91,6 +91,7 @@ struct Onb
         m_binormal.x = x*y/(z+1);
         m_binormal.y = -(x*x/(1+z)+z);
         m_binormal.z = y;
+        
     }
 
     __forceinline__ __device__ void inverse_transform( float3& p ) const
@@ -144,12 +145,6 @@ static __forceinline__ __device__ RadiancePRD* getPRD()
     return reinterpret_cast<RadiancePRD*>( unpackPointer( u0, u1 ) );
 }
 
-
-static __forceinline__ __device__ void setPayloadOcclusion( bool occluded )
-{
-    optixSetPayload_0( static_cast<uint32_t>( occluded ) );
-}
-
 // pdf(r,theta) = cos(theta)/(2*pi*r^2) ?
 static __forceinline__ __device__ void cosine_sample_hemisphere( const float u1, const float u2, float3& p )
 {
@@ -197,31 +192,44 @@ static __forceinline__ __device__ void traceRadiance(
 }
 
 
-static __forceinline__ __device__ bool traceOcclusion(
+static __forceinline__ __device__ float3 traceOcclusion(
         OptixTraversableHandle handle,
         float3                 ray_origin,
         float3                 ray_direction,
         float                  tmin,
-        float                  tmax
+        float                  tmax,
+        bool                   curinmat,
+        float*                 newdist
         )
 {
-    uint32_t u0 = false;
+    
+    RadiancePRD prd;
+    prd.countEmitted = false;
+    prd.done = false;
+    prd.origin = ray_origin;
+    prd.direction.x =tmax;
+    prd.curbrdf = make_float3(1.f);
+    prd.inmat = curinmat;
 
+    uint32_t u0, u1;
+    packPointer( &prd, u0, u1 );
+    while(prd.done==false && prd.countEmitted==false){
         optixTrace(
             handle,
-            ray_origin,
+            prd.origin,
             ray_direction,
             tmin,
-            tmax,
+            prd.direction.x,
             0.0f,                    // rayTime
             OptixVisibilityMask(1),
             OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
             RAY_TYPE_OCCLUSION,      // SBT offset
             RAY_TYPE_COUNT,          // SBT stride
             RAY_TYPE_OCCLUSION,      // missSBTIndex
-            u0);
-    
-    return u0;
+            u0,u1);
+    }
+    *newdist = prd.direction.x;
+    return prd.curbrdf;
 }
 
 
@@ -289,12 +297,12 @@ __forceinline__ __device__ float3 calcBRDF(BRDFMaterial* cur_mat, float3 l, floa
         float cos_h = dot(h, n);      
 
         if (same_hemisphere(l, v, n) && cur_mat->metallic != 0) {
-            float Gs = Smith_GGX(cos_v, alpha) * Smith_GGX(cos_l, alpha);
+            float Gs = Smith_GGX(dot(l,h), alpha) * Smith_GGX(dot(v,h), alpha);
             float D_TR = D_GXX(cos_h, alpha);
             float RF_h = SchlickFresnel(1.0f, cur_mat->ior, dot(v,h)); // interaction with air
             float X_vh = X_plus(dot(v, h));
             float X_lh = X_plus(dot(l, h));
-            f_spec = D_TR * Gs * RF_h*(X_vh * X_lh);
+            f_spec = D_TR * Gs * RF_h *(X_vh * X_lh);
         } 
 
         if (cur_mat->spec_trans != 0){
@@ -304,39 +312,39 @@ __forceinline__ __device__ float3 calcBRDF(BRDFMaterial* cur_mat, float3 l, floa
                 f_trans = 0.f;
             }
             else {
-                bool exiting = (cos_l > 0.f);
-                float eta_l = exiting ? 1.f : cur_mat->ior;
-                float eta_v = exiting ? cur_mat->ior: 1.f;
-                float eta = eta_l / eta_v;
+bool exiting = (cos_l > 0.f);
+float eta_l = exiting ? 1.f : cur_mat->ior;
+float eta_v = exiting ? cur_mat->ior : 1.f;
+float eta = eta_l / eta_v;
 
-                //float3 ht = -normalize(l*eta + v);// wrong ??
-                float3 ht = exiting ? normalize(l*eta+v-2.f*dot(n,v)*n): normalize((l-2.f*dot(n,l)*n)*eta+v);//reflect half             
+//float3 ht = -normalize(l*eta + v);// wrong ??
+float3 ht = exiting ? normalize(l * eta + v - 2.f * dot(n, v) * n) : normalize((l - 2.f * dot(n, l) * n) * eta + v);//reflect half             
 
-                float cos_ht = dot(ht, n);
-                float D_TRt = D_GXX(cos_ht, alpha);// * X_plus(cos_ht);
-                float Gst = Smith_GGX(fabs(cos_v), alpha) * Smith_GGX(fabs(cos_l), alpha);
+float cos_ht = dot(ht, n);
+float D_TRt = D_GXX(cos_ht, alpha);// * X_plus(cos_ht);
+float v_dot_ht = dot(v, ht);
+float l_dot_ht = dot(l, ht);
+float Gst = Smith_GGX(fabs(v_dot_ht), alpha) * Smith_GGX(fabs(l_dot_ht), alpha); //Smith_GGX(fabs(cos_v), alpha) * Smith_GGX(fabs(cos_l), alpha);
 
-                float v_dot_ht = dot(v, ht);
-                float l_dot_ht = dot(l, ht);
-                float X_vht = X_plus(v_dot_ht/cos_v);
-                float X_lht = X_plus(l_dot_ht/cos_l);
-                
-                
-                //accurate fresnel
-                float cos_theta_t = sqrtf(1.f-(1.f-cos_v*cos_v)/(eta*eta));
-                float RF_ht = Fresnel(fabs(cos_v), fabs(cos_theta_t), eta);
-                //approx fresnel
-                //float RF_ht = SchlickFresnel(eta_v, eta_l, fabs(dot(v, ht)));
-                
-                float tmp = eta /(fabs(v_dot_ht) + fabs(l_dot_ht) * eta);
-                tmp = fabs(l_dot_ht) * fabs(v_dot_ht) * (tmp * tmp)*4.0f;
-                f_trans = tmp * (1.0f - RF_ht) * D_TRt * Gst *(X_vht * X_lht);
-                
+float X_vht = X_plus(v_dot_ht / cos_v);
+float X_lht = X_plus(l_dot_ht / cos_l);
+
+
+//accurate fresnel
+float cos_theta_t = sqrtf(1.f - (1.f - cos_v * cos_v) / (eta * eta));
+float RF_ht = Fresnel(fabs(cos_v), fabs(cos_theta_t), eta);
+//approx fresnel
+//float RF_ht = SchlickFresnel(eta_v, eta_l, fabs(dot(v, ht)));
+
+float tmp = eta / (fabs(v_dot_ht) + fabs(l_dot_ht) * eta);
+tmp = fabs(l_dot_ht) * fabs(v_dot_ht) * (tmp * tmp) * 4.0f;
+f_trans = tmp * (1.0f - RF_ht) * D_TRt * Gst * (X_vht * X_lht);
+
             }
             return (f_diff * (1.f - fspec_trans) + f_trans * fspec_trans) * (1.f - fmetallic) + f_spec * fmetallic;
-            
+
         }
-        return f_diff * (1 - fmetallic) + f_spec *fmetallic; // linear interp of diffuse and specularity
+        return f_diff * (1 - fmetallic) + f_spec * fmetallic; // linear interp of diffuse and specularity
     }
     return f_diff;
 }
@@ -350,60 +358,69 @@ __forceinline__ __device__ float3 calcBRDF(BRDFMaterial* cur_mat, float3 l, floa
 
 extern "C" __global__ void __raygen__rg()
 {
-    const int    w   = params.width;
-    const int    h   = params.height;
+    const int    w = params.width;
+    const int    h = params.height;
     const float3 eye = params.eye;
-    const float3 U   = params.U;
-    const float3 V   = params.V;
-    const float3 W   = params.W;
+    const float3 U = params.U;
+    const float3 V = params.V;
+    const float3 W = params.W;
     const uint3  idx = optixGetLaunchIndex();
     const int    subframe_index = params.subframe_index;
 
-    uint32_t seed = tea<4>( idx.y*w + idx.x, subframe_index );
+    uint32_t seed = tea<4>(idx.y * w + idx.x, subframe_index);
 
-    float3 result = make_float3( 0.0f );
+    float3 result = make_float3(0.0f);
     int i = params.samples_per_launch;
     do
     {
-        const float2 subpixel_jitter = make_float2( rnd( seed )-0.5f, rnd( seed )-0.5f );
+        const float2 subpixel_jitter = make_float2(rnd(seed) - 0.5f, rnd(seed) - 0.5f);
 
         const float2 d = 2.0f * make_float2(
-                ( static_cast<float>( idx.x ) + subpixel_jitter.x ) / static_cast<float>( w ),
-                ( static_cast<float>( idx.y ) + subpixel_jitter.y ) / static_cast<float>( h )
-                ) - 1.0f;
-        float3 ray_direction = normalize(d.x*U + d.y*V + W);
-        float3 ray_origin    = eye;
+            (static_cast<float>(idx.x) + subpixel_jitter.x) / static_cast<float>(w),
+            (static_cast<float>(idx.y) + subpixel_jitter.y) / static_cast<float>(h)
+        ) - 1.0f;
+        float3 ray_direction = normalize(d.x * U + d.y * V + W);
+        float3 ray_origin = eye;
 
         RadiancePRD prd;
-        prd.emitted      = make_float3(0.f);
-        prd.radiance     = make_float3(0.f);
-        prd.curbrdf  = make_float3(1.f);
+        prd.emitted = make_float3(0.f);
+        prd.radiance = make_float3(0.f);
+        prd.curbrdf = make_float3(1.f);
         prd.countEmitted = true;
-        prd.done         = false;
-        prd.seed         = seed;
+        prd.done = false;
+        prd.seed = seed;
         prd.direction = ray_direction;
         prd.origin = ray_origin;
         prd.inmat = false;
 
         float3 throughput = make_float3(1.f);
-        
+
         int depth = 0;
-        for( ;; )
+        for (;; )
         {
             traceRadiance(
-                    params.handle,
-                    ray_origin,
-                    ray_direction,
-                    0.01f,  // tmin       // TODO: smarter offset
-                    1e16f,  // tmax
-                    &prd );
-            result += prd.emitted*throughput;  // L_e term 
+                params.handle,
+                ray_origin,
+                ray_direction,
+                0.01f,  // tmin       // TODO: smarter offset
+                1e16f,  // tmax
+                &prd);
+            result += prd.emitted * throughput;  // L_e term 
             result += prd.radiance * throughput;//prd.throughput;
 
             throughput *= prd.curbrdf;
 
-            if( prd.done  || depth >= 10)//3 ) // TODO RR, variable for depth
+            if (prd.done || depth >= 40)//3 ) // TODO RR, variable for depth
                 break;
+            if (throughput.x < 0.0001 && throughput.y < 0.001 && throughput.z < 0.001){
+                float rrp = rnd(prd.seed);
+                if (rrp < 0.7) {
+                    break;
+                }
+                else {
+                    throughput /= (1.f - rrp);
+                }
+            }
 
             ray_origin    = prd.origin;
             ray_direction = prd.direction;
@@ -437,9 +454,55 @@ extern "C" __global__ void __miss__radiance()
     prd->done     = true;
 }
 
+extern "C" __global__ void __miss__occlusion(){
+    RadiancePRD*  prd     = getPRD();
+    prd->done = true;
+}
+
 extern "C" __global__ void __closesthit__occlusion()
 {
-    setPayloadOcclusion( true );   
+    HitGroupData* rt_data = (HitGroupData*)optixGetSbtDataPointer();
+    RadiancePRD*  prd     = getPRD();
+    BRDFMaterial* cur_mat = &(params.materials[rt_data->mat_id]);
+    if (cur_mat->spec_trans == 0){
+        prd->countEmitted = true;
+        prd->curbrdf = make_float3(0.f);
+    } else {
+        const float3       ray_dir         = optixGetWorldRayDirection();
+        float curt = optixGetRayTmax();
+        const int          prim_idx        = optixGetPrimitiveIndex();
+        const int          vert_idx_offset = prim_idx*3;
+        const unsigned int hit_kind        = optixGetHitKind();
+
+        float3 N; 
+        // get hit point's setting
+        if( optixIsTriangleHit() )
+        {
+            const float3 v0  = make_float3( rt_data->vertices[vert_idx_offset + 0] );
+            const float3 v1  = make_float3( rt_data->vertices[vert_idx_offset + 1] );
+            const float3 v2  = make_float3( rt_data->vertices[vert_idx_offset + 2] );
+            const float3 N_0 = normalize( cross( v1 - v0, v2 - v0 ) );
+            if (prd->inmat) {
+                N = faceforward(N_0, ray_dir, N_0);
+            }
+            else {
+                N = faceforward(N_0, -ray_dir, N_0);
+            }
+        }
+        else
+        {
+            N = make_float3(int_as_float( optixGetAttribute_0() ),
+                            int_as_float( optixGetAttribute_1() ),
+                            int_as_float( optixGetAttribute_2() ));
+        }
+        float tmpnDl = fabs(dot(normalize(ray_dir),N));
+        float3 tmpbrdf = calcBRDF(cur_mat, normalize(ray_dir),-normalize(ray_dir), N);
+        prd->curbrdf *= (tmpbrdf*tmpnDl*tmpnDl/(curt*curt));
+
+        prd->direction.x -= curt;
+        prd->origin =  optixGetWorldRayOrigin() + curt * ray_dir;
+        prd->inmat = !prd->inmat;
+    }
 }
 
 
@@ -482,6 +545,7 @@ extern "C" __global__ void __closesthit__radiance()
     if (pdfweight <= 0.f){
         pdfweight = 0.f;
     }
+    bool curinmat = prd->inmat;
     // sampling emission only once to avoid noise
     prd->emitted = ( prd->countEmitted ) ? cur_mat->emission*pdfweight : make_float3( 0.0f ); // shuold mult by cos_theta'?
     
@@ -496,11 +560,12 @@ extern "C" __global__ void __closesthit__radiance()
         cosine_sample_hemisphere( z1, z2, w_in );
         
         float cur_eta = cur_mat->ior;
-        if (cur_mat->spec_trans != 0){
+        bool wouldrefract = (cur_mat->spec_trans != 0 && prd->inmat == false); 
+        if (wouldrefract){
             pdfweight*=(cur_eta+1.0f);
         }
         
-        if (prd->inmat == false && cur_mat->spec_trans != 0 && rnd(seed) > 1.0f/(1.0f+cur_eta)) {   
+        if (wouldrefract && rnd(seed) > 1.0f/(1.0f+cur_eta)) {   
             prd->inmat = true;
             Onb onb(-N);
             onb.inverse_transform(w_in);
@@ -526,27 +591,30 @@ extern "C" __global__ void __closesthit__radiance()
         // calculate Geo term G(p_n<->p_n-1)
         const float  Ldist = length(light_pos - P);
         const float3 L = normalize(light_pos - P);
-        const float  nDl = dot(N, L);
+        const float  nDl = (cur_mat->spec_trans == 0) ? fabs(dot(N,L)):dot(N,L);//dot(N, L);
         const float  LnDl = -dot(light.normal, L);
-        
 
         float weight = 0.0f;
         prd->radiance = make_float3(0.f);
+    
         if (nDl > 0.0f && LnDl > 0.0f)
         {
-            const bool occluded = traceOcclusion(
+           float newdist;
+            const float3 accbrdf = traceOcclusion(
                 params.handle,
                 P,
                 L,
                 0.01f,         // tmin
-                Ldist - 0.01f  // tmax
+                Ldist - 0.01f,  // tmax
+                curinmat,
+                &newdist
             );
 
-            if (!occluded)
+            if (accbrdf.x != 0.f && accbrdf.y != 0.f && accbrdf.z != 0.f)
             {
                 const float dA = length(cross(light.v1, light.v2));
-                weight = nDl * LnDl * dA / max(M_PIf * Ldist * Ldist, 0.001f);
-                prd->radiance = (calcBRDF(cur_mat, normalize(L), -normalize(prd->direction), normalize(N)) * light.emission) * weight*pdfweight; //shuold add cos_theta' ?
+                weight = nDl * LnDl * dA / max(M_PIf * newdist * newdist, 0.001f);
+                prd->radiance = accbrdf*(calcBRDF(cur_mat, normalize(L), -normalize(prd->direction), normalize(N)) * light.emission) * weight*pdfweight; //shuold add cos_theta' ?
             }
             
         }

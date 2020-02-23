@@ -397,8 +397,8 @@ void initMaterials(CutoutsState& state) {
     state.params.materials[5].base_color = { 0.80f, 0.80f, 0.80f };
     state.params.materials[5].emission = { 0.0f,  0.0f, 0.0f };
     state.params.materials[5].ior = 1.1f;
-    state.params.materials[5].metallic = 20;
-    state.params.materials[5].roughness = 20;
+    state.params.materials[5].metallic = 0;
+    state.params.materials[5].roughness = 15;
     state.params.materials[5].spec_trans = 100;
 }
 
@@ -759,8 +759,8 @@ void createProgramGroups( CutoutsState& state )
 
     memset( &miss_prog_group_desc, 0, sizeof( OptixProgramGroupDesc ) );
     miss_prog_group_desc.kind                   = OPTIX_PROGRAM_GROUP_KIND_MISS;
-    miss_prog_group_desc.miss.module            = nullptr;  // miss program for occlusion rays
-    miss_prog_group_desc.miss.entryFunctionName = nullptr;
+    miss_prog_group_desc.miss.module = state.ptx_module;//nullptr;  // miss program for occlusion rays
+        miss_prog_group_desc.miss.entryFunctionName = "__miss__occlusion";//nullptr;
     sizeof_log                                  = sizeof( log );
     OPTIX_CHECK_LOG( optixProgramGroupCreate( state.context, &miss_prog_group_desc,
                                               1,  // num program groups
