@@ -341,10 +341,10 @@ tmp = fabs(l_dot_ht) * fabs(v_dot_ht) * (tmp * tmp) * 4.0f;
 f_trans = tmp * (1.0f - RF_ht) * D_TRt * Gst * (X_vht * X_lht);
 
             }
-            return (f_diff * (1.f - fspec_trans) + f_trans * fspec_trans) * (1.f - fmetallic) + f_spec * fmetallic;
+            return (f_diff * (1.f - fspec_trans) + cur_mat->base_color*f_trans * fspec_trans) * (1.f - fmetallic) + f_diff*f_spec * fmetallic;
 
         }
-        return f_diff * (1 - fmetallic) + f_spec * fmetallic; // linear interp of diffuse and specularity
+        return f_diff * ((1.f - fmetallic) + f_spec * fmetallic); // linear interp of diffuse and specularity
     }
     return f_diff;
 }

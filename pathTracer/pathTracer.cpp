@@ -398,7 +398,7 @@ void initMaterials(CutoutsState& state) {
     state.params.materials[5].emission = { 0.0f,  0.0f, 0.0f };
     state.params.materials[5].ior = 1.1f;
     state.params.materials[5].metallic = 0;
-    state.params.materials[5].roughness = 15;
+    state.params.materials[5].roughness = 25;
     state.params.materials[5].spec_trans = 100;
 }
 
